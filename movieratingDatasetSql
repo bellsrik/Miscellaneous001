@@ -1,0 +1,93 @@
+package com.bellaryorg.spark
+
+import org.apache.spark._
+import org.apache.spark.SparkContext._
+import org.apache.spark.sql._
+import org.apache.spark.sql.Row._
+import org.apache.spark.sql.functions._
+import org.apache.log4j._
+import java.nio.charset.CodingErrorAction
+import scala.io.Source
+import scala.io.Codec
+
+object movierating {
+  
+  //Register the source and target files/directories
+  val rating_s3 = "C:/BellaryOrg/SourceData/movierating/ml-1m/ratings.dat"
+  val user_s3 = "C:/BellaryOrg/SourceData/movierating/ml-1m/users.dat"
+  val movie_s3 = "C:/BellaryOrg/SourceData/movierating/ml-1m/movies.dat"
+  val results2_s3 = "C:/BellaryOrg/SourceData/movierating/ml-1m/results_2"
+  val results3_s3 = "C:/BellaryOrg/SourceData/movierating/ml-1m/results_3"
+  
+  //Create Case Classes to handle the source files passed to custom functions
+  final case class ratingClass(UserID1: Int, MovieID1: Int, Rating: Int, Timestamp: String)
+  final case class userClass(UserID2: Int, Gender: String, Age: Int, Occupation: Int, Zipcode: String)
+  final case class movieClass(MovieID2: Int, Title: String, Genres: String)
+  
+  //Create custom function to handle each source file
+  def ratingMapper(line: String): ratingClass = {
+    implicit val codec = Codec("UTF-8")
+    codec.onMalformedInput(CodingErrorAction.REPLACE)
+    codec.onUnmappableCharacter(CodingErrorAction.REPLACE)
+    val fields = line.split("::")
+    val ratings: ratingClass = new ratingClass(fields(0).toInt, fields(1).toInt, fields(2).toInt, fields(3).toString)
+    return ratings
+  }
+  def userMapper(line: String): userClass = {
+    implicit val codec = Codec("UTF-8")
+    codec.onMalformedInput(CodingErrorAction.REPLACE)
+    codec.onUnmappableCharacter(CodingErrorAction.REPLACE)
+    val fields = line.split("::")
+    val users : userClass = new userClass(fields(0).toInt, fields(1).toString, fields(2).toInt, fields(3).toInt, fields(4).toString)
+    return users
+  }
+  def movieMapper(line: String): movieClass = {
+    implicit val codec = Codec("UTF-8")
+    codec.onMalformedInput(CodingErrorAction.REPLACE)
+    codec.onUnmappableCharacter(CodingErrorAction.REPLACE)
+    val fields = line.split("::")
+    val movies : movieClass = new movieClass(fields(0).toInt, fields(1).toString, fields(2).toString)
+    return movies
+  }
+  
+  //define main method to setup logging and Spark session and logic to handle transformations
+  def main(args: Array[String]) {
+    
+    //Setup logging at Error level
+    Logger.getLogger("org").setLevel(Level.ERROR)
+    val spark = SparkSession
+    .builder()
+    .master("local[*]")
+    .appName("movierating")
+    .config("spark.sql.warehouse.dir",  "file:///C:/temp")
+    .getOrCreate()
+    
+    //register RDD's and Create Dataset for each RDD.
+    import spark.implicits._
+    val rating_lines = spark.sparkContext.textFile(rating_s3)
+    val ratingRDD = rating_lines.map(ratingMapper)
+    val ratingSchema = ratingRDD.toDS()
+    ratingSchema.createOrReplaceTempView("Ratings")
+    
+    val user_lines = spark.sparkContext.textFile(user_s3)
+    val userRDD = user_lines.map(userMapper)
+    val userSchema = userRDD.toDS()
+    userSchema.createOrReplaceTempView("Users")
+    
+    val movie_lines = spark.sparkContext.textFile(movie_s3)
+    val movieRDD = movie_lines.map(movieMapper)
+    val movieSchema = movieRDD.toDS()
+    movieSchema.createOrReplaceTempView("Movies")
+    
+    //Query the Temporary views from Dataset using SQL
+    val search_2 = spark.sql("""SELECT * FROM Ratings INNER JOIN Movies ON Ratings.MovieID1 = Movies.MovieID2""")
+    val search_3 = spark.sql("""SELECT * FROM (Ratings INNER JOIN Users ON Ratings.UserID1 = Users.UserID2)INNER JOIN Movies ON Ratings.MovieID1 = Movies.MovieID2""")
+    
+    //Save the results
+    val results2 = search_2.repartition(1).write.format("csv").save(results2_s3)    
+    val results3 = search_3.repartition(1).write.format("csv").save(results3_s3)
+    
+    //Stop Spark Session
+    spark.stop()
+  }
+}
